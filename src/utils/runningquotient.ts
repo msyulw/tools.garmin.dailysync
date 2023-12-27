@@ -1,5 +1,4 @@
 import {
-    BARK_KEY_DEFAULT,
     RQ_COOKIE_DEFAULT,
     RQ_CSRF_TOKEN_DEFAULT,
     RQ_HOST_DEFAULT,
@@ -16,7 +15,6 @@ const core = require('@actions/core');
 const RQ_USERID = process.env.RQ_USERID ?? RQ_USERID_DEFAULT;
 const RQ_COOKIE = process.env.RQ_COOKIE ?? RQ_COOKIE_DEFAULT;
 const RQ_CSRF_TOKEN = process.env.RQ_CSRF_TOKEN ?? RQ_CSRF_TOKEN_DEFAULT;
-const BARK_KEY = process.env.BARK_KEY ?? BARK_KEY_DEFAULT;
 
 export const doRQGoogleSheets = async () => {
     const rqResult = await getRQOverView();
@@ -65,15 +63,11 @@ export async function getRQOverView() {
         } else {
             console.error('ERROR at 0, 检查TOKEN');
             core.setFailed('检查 RQ TOKEN');
-            await axios.get(
-                `https://api.day.app/${BARK_KEY}/RQ运行失败了/ERROR检查TOKEN`);
             return {};
         }
     } catch (e) {
         console.error('ERROR, 检查TOKEN', e);
         core.setFailed('检查 RQ TOKEN');
-        await axios.get(
-            `https://api.day.app/${BARK_KEY}/RQ运行失败了/${e.message}`);
         throw new Error(e);
     }
 
