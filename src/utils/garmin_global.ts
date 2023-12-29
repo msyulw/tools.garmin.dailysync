@@ -90,6 +90,7 @@ export const migrateGarminGlobal2GarminCN = async (count = 200) => {
 };
 
 export const syncGarminGlobal2GarminCN = async () => {
+    const timeStamp = new Date().toLocaleString("zh-cn")
     const clientCN = await getGaminCNClient();
     const clientGlobal = await getGaminGlobalClient();
 
@@ -100,7 +101,7 @@ export const syncGarminGlobal2GarminCN = async () => {
     const latestCnActStartTime = cnActs[0]?.startTimeLocal ?? '0';
 
     if (latestCnActStartTime === latestGlobalActStartTime) {
-        console.log(`没有要同步的活动内容, 最近的活动:  【 ${globalActs[0]?.activityName} 】, 开始于: 【 ${latestGlobalActStartTime} 】`);
+        console.log(timeStamp + ` 没有要同步的活动内容, 最近的活动:  【 ${globalActs[0]?.activityName} 】, 开始于: 【 ${latestGlobalActStartTime} 】`);
     } else {
         // fix: #18
         _.reverse(globalActs);
@@ -111,7 +112,7 @@ export const syncGarminGlobal2GarminCN = async () => {
                 // 下载佳明原始数据
                 const filePath = await downloadGarminActivity(globalAct.activityId, clientGlobal);
                 // 上传到佳明中国区的
-                console.log(`本次开始向中国区上传第 ${number2capital(actualNewActivityCount)} 条数据，【 ${globalAct.activityName} 】，开始于 【 ${globalAct.startTimeLocal} 】，活动ID: 【 ${globalAct.activityId} 】`);
+                console.log(timeStamp + ` 本次开始向中国区上传第 ${number2capital(actualNewActivityCount)} 条数据，【 ${globalAct.activityName} 】，开始于 【 ${globalAct.startTimeLocal} 】，活动ID: 【 ${globalAct.activityId} 】`);
                 await uploadGarminActivity(filePath, clientCN);
                 await new Promise(resolve => setTimeout(resolve, 1000));
                 actualNewActivityCount++;
