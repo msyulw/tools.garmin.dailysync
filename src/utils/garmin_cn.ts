@@ -7,7 +7,7 @@ import {
     GARMIN_USERNAME_DEFAULT,
     GARMIN_SYNC_NUM_DEFAULT
 } from '../constant';
-import { downloadGarminActivity, uploadGarminActivity } from './garmin_common';
+import { isDownloaded, downloadGarminActivity, uploadGarminActivity } from './garmin_common';
 import { GarminClientType } from './type';
 import { number2capital } from './number_tricks';
 const core = require('@actions/core');
@@ -121,5 +121,22 @@ export const syncGarminCN2GarminGlobal = async () => {
                 actualNewActivityCount++;
             }
         }
+    }
+};
+
+export const downloadAllGarminCN = async (count = 200) => {
+    const actIndex = Number(GARMIN_MIGRATE_START) ?? 0;
+    const totalAct = count;
+    const clientCN = await getGaminCNClient();
+    const actSlices = await clientCN.getActivities(actIndex, totalAct);
+    const runningActs = actSlices;
+
+    for (let j = 0; j < runningActs.length; j++) {
+        const act = runningActs[j];
+        if (isDownloaded(act.activityId)) {
+            continue
+        }
+        const filePath = await downloadGarminActivity(act.activityId, clientCN);
+        console.log(`下载 ${filePath} 完成`)
     }
 };

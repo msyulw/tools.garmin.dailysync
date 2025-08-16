@@ -53,6 +53,11 @@ export const downloadGarminActivity = async (activityId, client: GarminClientTyp
     return path;
 };
 
+export const isDownloaded = (activityId, ) => {
+    const originZipFile = DOWNLOAD_DIR + '/' + activityId + '.zip';
+    return fs.existsSync(originZipFile)
+};
+
 export const getGarminStatistics = async (client: GarminClientType): Promise<Record<string, any>> => {
     // Get a list of default length with most recent activities
     const acts = await client.getActivities(0, 10);
