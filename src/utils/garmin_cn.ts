@@ -10,6 +10,7 @@ import {
 import { isDownloaded, downloadGarminActivity, uploadGarminActivity } from './garmin_common';
 import { GarminClientType } from './type';
 import { number2capital } from './number_tricks';
+import { processActivityWithInsights, GarminActivity, isAIInsightsEnabled } from './ai_insights';
 const core = require('@actions/core');
 import _ from 'lodash';
 import { getSessionFromDB, initDB, saveSessionToDB, updateSessionToDB } from './sqlite';
@@ -112,9 +113,11 @@ export const syncGarminCN2GarminGlobal = async () => {
         for (let i = 0; i < cnActs.length; i++) {
             const cnAct = cnActs[i];
             if (cnAct.startTimeLocal > latestGlobalActStartTime) {
-                // 下载佳明原始数据
+                // Download original Garmin data
                 const filePath = await downloadGarminActivity(cnAct.activityId, clientCN);
-                // 上传到佳明国际区
+                // Generate AI insights and add to source activity (with trending context)
+                await processActivityWithInsights(cnAct as GarminActivity, clientCN, cnActs as GarminActivity[]);
+                // Upload to Garmin Global
                 console.log(timeStamp + ` 本次开始向国际区上传第 ${number2capital(actualNewActivityCount)} 条数据，【 ${cnAct.activityName} 】，开始于 【 ${cnAct.startTimeLocal} 】，活动ID: 【 ${cnAct.activityId} 】`);
                 await uploadGarminActivity(filePath, clientGlobal);
                 await new Promise(resolve => setTimeout(resolve, 1000));
@@ -128,15 +131,39 @@ export const downloadAllGarminCN = async (count = 200) => {
     const actIndex = Number(GARMIN_MIGRATE_START) ?? 0;
     const totalAct = count;
     const clientCN = await getGaminCNClient();
+    
+    console.log(`Fetching up to ${totalAct} activities from CN starting at index ${actIndex}...`);
     const actSlices = await clientCN.getActivities(actIndex, totalAct);
+    console.log(`Found ${actSlices.length} activities`);
+    
     const runningActs = actSlices;
+    let downloadedCount = 0;
+    let insightsCount = 0;
 
     for (let j = 0; j < runningActs.length; j++) {
         const act = runningActs[j];
-        if (isDownloaded(act.activityId)) {
-            continue
+        
+        // Download activity if not already downloaded
+        if (!isDownloaded(act.activityId)) {
+            const filePath = await downloadGarminActivity(act.activityId, clientCN);
+            console.log(`下载 ${filePath} 完成`);
+            downloadedCount++;
         }
-        const filePath = await downloadGarminActivity(act.activityId, clientCN);
-        console.log(`下载 ${filePath} 完成`)
+        
+        // Process AI insights if enabled
+        if (isAIInsightsEnabled()) {
+            const result = await processActivityWithInsights(act as GarminActivity, clientCN, runningActs as GarminActivity[]);
+            if (result) {
+                insightsCount++;
+            }
+        }
     }
+    
+    console.log(`\n========================================`);
+    console.log(`Processing complete!`);
+    console.log(`Activities downloaded: ${downloadedCount}`);
+    if (isAIInsightsEnabled()) {
+        console.log(`AI insights generated: ${insightsCount}`);
+    }
+    console.log(`========================================`);
 };

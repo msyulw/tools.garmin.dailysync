@@ -64,4 +64,9 @@ export const STRAVA_CLIENT_ID_DEFAULT = '';
 export const STRAVA_CLIENT_SECRET_DEFAULT = '';
 export const STRAVA_REDIRECT_URI_DEFAULT = '';
 
-
+/**
+ * GEMINI AI CONFIGURATION
+ */
+export const GEMINI_API_KEY_DEFAULT = '';
+export const AI_INSIGHTS_ENABLED_DEFAULT = true;
+export const AI_INSIGHTS_LEGACY_COUNT_DEFAULT = 10;

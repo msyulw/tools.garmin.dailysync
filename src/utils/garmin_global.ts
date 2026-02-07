@@ -8,6 +8,7 @@ import { getGaminCNClient } from './garmin_cn';
 import { GarminClientType } from './type';
 import { downloadGarminActivity, uploadGarminActivity } from './garmin_common';
 import { number2capital } from './number_tricks';
+import { processActivityWithInsights, GarminActivity, isAIInsightsEnabled } from './ai_insights';
 const core = require('@actions/core');
 import _ from 'lodash';
 import { getSessionFromDB, initDB, saveSessionToDB, updateSessionToDB } from './sqlite';
@@ -109,9 +110,11 @@ export const syncGarminGlobal2GarminCN = async () => {
         for (let i = 0; i < globalActs.length; i++) {
             const globalAct = globalActs[i];
             if (globalAct.startTimeLocal > latestCnActStartTime) {
-                // 下载佳明原始数据
+                // Download original Garmin data
                 const filePath = await downloadGarminActivity(globalAct.activityId, clientGlobal);
-                // 上传到佳明中国区的
+                // Generate AI insights and add to source activity (with trending context)
+                await processActivityWithInsights(globalAct as GarminActivity, clientGlobal, globalActs as GarminActivity[]);
+                // Upload to Garmin China
                 console.log(timeStamp + ` 本次开始向中国区上传第 ${number2capital(actualNewActivityCount)} 条数据，【 ${globalAct.activityName} 】，开始于 【 ${globalAct.startTimeLocal} 】，活动ID: 【 ${globalAct.activityId} 】`);
                 await uploadGarminActivity(filePath, clientCN);
                 await new Promise(resolve => setTimeout(resolve, 1000));

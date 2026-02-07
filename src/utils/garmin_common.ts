@@ -58,6 +58,87 @@ export const isDownloaded = (activityId, ) => {
     return fs.existsSync(originZipFile)
 };
 
+/**
+ * Add AI insights to a Garmin activity description
+ * Uses PUT via X-Http-Method-Override to activity-service/activity/{activityId}
+ * @param activityId The activity ID to update
+ * @param comment The AI insight text to add
+ * @param client GarminClientType
+ * @param forceCheck If true, re-add insight even if one already exists
+ * @returns true if successful, false otherwise
+ */
+export const addActivityComment = async (
+    activityId: string | number, 
+    comment: string, 
+    client: GarminClientType,
+    forceCheck: boolean = false
+): Promise<boolean> => {
+    try {
+        // Get current activity details
+        const activity = await client.getActivity({ activityId: activityId });
+        
+        if (!activity) {
+            console.log(`AI Insights: Could not fetch activity ${activityId}`);
+            return false;
+        }
+        
+        let currentDescription = activity.description || '';
+        
+        // Check if AI insight is already present
+        const hasExistingInsight = currentDescription.includes('🤖 AI Insights') || currentDescription.includes('AI Insights (');
+        
+        if (hasExistingInsight) {
+            if (!forceCheck) {
+                console.log(`AI Insights: Activity ${activityId} already has AI insight, skipping`);
+                return true;
+            }
+            // Remove existing AI insight to replace with new one
+            // Pattern matches: optional separator (---) + 🤖 AI Insights... until end or next separator
+            const insightPattern = /(\n\n---\n\n)?🤖 AI Insights[^]*?(?=\n\n---\n\n|$)/g;
+            currentDescription = currentDescription.replace(insightPattern, '').trim();
+            console.log(`AI Insights: Replacing existing insight for activity ${activityId}`);
+        }
+        
+        // Prepare the updated description with separator
+        const separator = currentDescription ? '\n\n---\n\n' : '';
+        const newDescription = currentDescription + separator + comment;
+        
+        // Use POST with X-Http-Method-Override: PUT (same pattern the library uses for DELETE)
+        const activityUrl = client.url?.ACTIVITY + activityId;
+        
+        await client.client.post(activityUrl, {
+            activityId: Number(activityId),
+            activityName: activity.activityName,
+            description: newDescription,
+        }, {
+            headers: {
+                'X-Http-Method-Override': 'PUT',
+            }
+        });
+        
+        console.log(`AI Insights: Activity ${activityId} description updated successfully`);
+        return true;
+    } catch (error: any) {
+        const errorMessage = error?.message || error?.statusText || 'Unknown error';
+        const statusCode = error?.response?.status || error?.status || 'N/A';
+        console.error(`AI Insights: Failed to update activity ${activityId} (status: ${statusCode}): ${errorMessage}`);
+        return false;
+    }
+};
+
+/**
+ * Check if an activity already has AI insights in its description
+ */
+export const hasActivityInsight = async (activityId: string | number, client: GarminClientType): Promise<boolean> => {
+    try {
+        const activity = await client.getActivity({ activityId: activityId });
+        const description = activity?.description || '';
+        return description.includes('🤖 AI Insights') || description.includes('AI Insights (');
+    } catch (error) {
+        return false;
+    }
+};
+
 export const getGarminStatistics = async (client: GarminClientType): Promise<Record<string, any>> => {
     // Get a list of default length with most recent activities
     const acts = await client.getActivities(0, 10);
