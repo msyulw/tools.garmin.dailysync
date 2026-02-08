@@ -51,20 +51,50 @@ export interface GarminActivity {
     startTimeLocal: string;
     distance?: number;
     duration?: number;
+    movingDuration?: number;
+    elapsedDuration?: number;
     averageSpeed?: number;
+    maxSpeed?: number;
     averageHR?: number;
     maxHR?: number;
     calories?: number;
     elevationGain?: number;
+    elevationLoss?: number;
+    minElevation?: number;
+    maxElevation?: number;
     averageRunningCadenceInStepsPerMinute?: number;
+    maxRunningCadenceInStepsPerMinute?: number;
     aerobicTrainingEffect?: number;
     anaerobicTrainingEffect?: number;
+    trainingEffectLabel?: string;
     vO2MaxValue?: number;
     avgStrideLength?: number;
     avgGroundContactTime?: number;
     avgVerticalOscillation?: number;
     avgVerticalRatio?: number;
     activityTrainingLoad?: number;
+    // Power metrics
+    avgPower?: number;
+    maxPower?: number;
+    normPower?: number;
+    // Stamina
+    beginningStamina?: number;
+    endingStamina?: number;
+    minStamina?: number;
+    // Temperature
+    avgTemperature?: number;
+    minTemperature?: number;
+    maxTemperature?: number;
+    // Intensity Minutes
+    moderateIntensityMinutes?: number;
+    vigorousIntensityMinutes?: number;
+    // Body Battery
+    bodyBatteryChange?: number;
+    // Sweat/Hydration
+    estimatedSweatLoss?: number;
+    // Pace metrics
+    avgGradeAdjustedPace?: number;
+    bestPace?: number;
 }
 
 /**
@@ -239,6 +269,22 @@ const formatHistoricalSection = (context: HistoricalContext, currentActivity: Ga
 };
 
 /**
+ * Extract time of day from timestamp
+ */
+const getTimeOfDay = (timestamp: string): string => {
+    try {
+        const date = new Date(timestamp);
+        const hour = date.getHours();
+        if (hour >= 5 && hour < 12) return 'Morning';
+        if (hour >= 12 && hour < 17) return 'Afternoon';
+        if (hour >= 17 && hour < 21) return 'Evening';
+        return 'Night';
+    } catch {
+        return 'Unknown';
+    }
+};
+
+/**
  * Format activity data into a prompt for Gemini
  */
 const formatActivityPrompt = (activity: GarminActivity, historicalContext?: HistoricalContext): string => {
@@ -250,57 +296,145 @@ const formatActivityPrompt = (activity: GarminActivity, historicalContext?: Hist
         : 'N/A';
 
     const historicalSection = historicalContext ? formatHistoricalSection(historicalContext, activity) : '';
+    
+    // Extract time of day from timestamp
+    const timeOfDay = getTimeOfDay(activity.startTimeLocal);
+    
+    // Activity name typically contains location (e.g., "Shenzhen Running", "Park Run")
+    // The location context is preserved in the activity name field
 
-    // Detect workout intent from activity name for context
-    const nameLower = activity.activityName.toLowerCase();
+    // Infer workout type from data points (not activity name)
     const workoutHints: string[] = [];
     
-    if (nameLower.includes('sprint') || nameLower.includes('interval') || nameLower.includes('hiit') || nameLower.includes('speed')) {
-        workoutHints.push('This appears to be a high-intensity/sprint workout - expect high HR, high anaerobic effect, possibly lower distance');
+    // Interval/Sprint detection: high max HR vs moderate avg HR indicates HR spikes
+    if (activity.maxHR && activity.averageHR) {
+        const hrVariance = activity.maxHR - activity.averageHR;
+        if (hrVariance > 30) {
+            workoutHints.push(`INTERVAL/SPRINT INDICATOR: High HR variance (${hrVariance} bpm between max and avg) suggests interval training with intensity spikes`);
+        }
     }
-    if (nameLower.includes('recovery') || nameLower.includes('easy') || nameLower.includes('slow')) {
-        workoutHints.push('This appears to be a recovery/easy run - expect lower HR, lower intensity, focus on aerobic effect');
+    
+    // High intensity detection: high anaerobic effect
+    if (activity.anaerobicTrainingEffect && activity.anaerobicTrainingEffect >= 3.0) {
+        workoutHints.push(`HIGH INTENSITY INDICATOR: Anaerobic effect ${activity.anaerobicTrainingEffect.toFixed(1)} indicates significant speed/power work`);
     }
-    if (nameLower.includes('long') || nameLower.includes('lsd') || nameLower.includes('endurance')) {
-        workoutHints.push('This appears to be a long/endurance run - focus on aerobic base building and pacing');
+    
+    // Recovery/Easy run detection: low HR, high aerobic effect, low anaerobic
+    if (activity.aerobicTrainingEffect && activity.anaerobicTrainingEffect) {
+        if (activity.aerobicTrainingEffect >= 2.0 && activity.anaerobicTrainingEffect < 1.0) {
+            workoutHints.push(`EASY/RECOVERY INDICATOR: High aerobic (${activity.aerobicTrainingEffect.toFixed(1)}) with low anaerobic (${activity.anaerobicTrainingEffect.toFixed(1)}) suggests recovery or easy pace`);
+        }
     }
-    if (nameLower.includes('tempo') || nameLower.includes('threshold')) {
-        workoutHints.push('This appears to be a tempo/threshold run - expect sustained moderate-high intensity');
+    
+    // Long run detection: duration > 60 min with moderate intensity
+    const durationMinutes = activity.duration ? activity.duration / 60 : 0;
+    if (durationMinutes > 60 && activity.aerobicTrainingEffect && activity.aerobicTrainingEffect >= 3.0) {
+        workoutHints.push(`LONG RUN INDICATOR: Duration ${durationMinutes.toFixed(0)} min with aerobic effect ${activity.aerobicTrainingEffect.toFixed(1)} suggests endurance training`);
     }
-    if (nameLower.includes('hill') || nameLower.includes('climb')) {
-        workoutHints.push('This appears to be a hill workout - elevation gain and HR spikes are expected');
+    
+    // Tempo/Threshold detection: sustained high HR (avg HR close to max HR - within 15 bpm)
+    if (activity.maxHR && activity.averageHR) {
+        const hrGap = activity.maxHR - activity.averageHR;
+        if (hrGap <= 15 && activity.averageHR > 150) {
+            workoutHints.push(`TEMPO/THRESHOLD INDICATOR: Sustained high HR (avg ${activity.averageHR} bpm, only ${hrGap} bpm below max) suggests threshold effort`);
+        }
+    }
+    
+    // Hill workout detection: significant elevation gain relative to distance
+    if (activity.elevationGain && activity.distance) {
+        const distanceKm = activity.distance / 1000;
+        const elevationPerKm = activity.elevationGain / distanceKm;
+        if (elevationPerKm > 30) {
+            workoutHints.push(`HILL WORKOUT INDICATOR: ${activity.elevationGain.toFixed(0)}m elevation gain (${elevationPerKm.toFixed(1)}m/km) indicates significant climbing`);
+        }
     }
     
     const workoutContext = workoutHints.length > 0 
-        ? `\n\n--- WORKOUT CONTEXT ---\n${workoutHints.join('\n')}`
+        ? `\n\n--- WORKOUT TYPE INFERENCE (from data) ---\n${workoutHints.join('\n')}`
         : '';
+
+    // Format pace metrics
+    const bestPaceFormatted = activity.bestPace && activity.bestPace > 0
+        ? (1000 / activity.bestPace / 60).toFixed(2)
+        : 'N/A';
+    const gradeAdjustedPace = activity.avgGradeAdjustedPace && activity.avgGradeAdjustedPace > 0
+        ? (1000 / activity.avgGradeAdjustedPace / 60).toFixed(2)
+        : 'N/A';
 
     return `Analyze this ${activityType} workout and provide brief, actionable insights in 2-3 sentences.
 
 IMPORTANT: Analyze the workout HOLISTICALLY. Consider:
-1. The activity name often indicates workout intent (sprint, interval, recovery, long run, etc.)
+1. Use the WORKOUT TYPE INFERENCE section (if present) which is derived from actual metrics
 2. Metrics should be interpreted in context - a sprint workout may have low average cadence but very high intensity
 3. Compare aerobic vs anaerobic training effects to understand the workout's purpose
 4. A high max HR with moderate average HR suggests interval training
 5. Don't judge metrics in isolation - understand the full picture
+6. Time of day affects performance (morning: fresh but stiff, afternoon: peak body temp, evening: accumulated fatigue, night: lower visibility)
+7. The activity name often contains LOCATION info (city, park, trail) - consider terrain and environmental factors
 
-Activity: ${activity.activityName}
+=== CONTEXT ===
+Activity: ${activity.activityName} (Location hint in name)
 Type: ${activityType}
-Date: ${activity.startTimeLocal}
-Distance: ${distanceKm} km
-Duration: ${durationMin} minutes
-Average Pace: ${paceMinPerKm} min/km
-Average Heart Rate: ${activity.averageHR ?? 'N/A'} bpm
-Max Heart Rate: ${activity.maxHR ?? 'N/A'} bpm
-Calories: ${activity.calories ?? 'N/A'}
-Elevation Gain: ${activity.elevationGain ?? 'N/A'} m
-Cadence: ${activity.averageRunningCadenceInStepsPerMinute ?? 'N/A'} spm
-Aerobic Training Effect: ${activity.aerobicTrainingEffect ?? 'N/A'}
-Anaerobic Training Effect: ${activity.anaerobicTrainingEffect ?? 'N/A'}
-VO2 Max: ${activity.vO2MaxValue ?? 'N/A'}
-Training Load: ${activity.activityTrainingLoad ?? 'N/A'}${workoutContext}${historicalSection}
+Time of Day: ${timeOfDay}
+Date/Time: ${activity.startTimeLocal}
 
-Focus on: understanding the workout's PURPOSE based on name and metrics, evaluating if metrics align with that purpose, training intensity, recovery recommendations, and trending performance vs historical data if available. Keep response concise (2-3 sentences).
+=== TIMING ===
+Duration: ${durationMin} minutes
+Moving Time: ${activity.movingDuration ? (activity.movingDuration / 60).toFixed(1) : 'N/A'} min
+Elapsed Time: ${activity.elapsedDuration ? (activity.elapsedDuration / 60).toFixed(1) : 'N/A'} min
+
+=== DISTANCE & PACE ===
+Distance: ${distanceKm} km
+Average Pace: ${paceMinPerKm} min/km
+Best Pace: ${bestPaceFormatted} min/km
+Grade-Adjusted Pace: ${gradeAdjustedPace} min/km
+
+=== HEART RATE ===
+Average HR: ${activity.averageHR ?? 'N/A'} bpm
+Max HR: ${activity.maxHR ?? 'N/A'} bpm
+
+=== TRAINING EFFECT ===
+Primary Benefit: ${activity.trainingEffectLabel ?? 'N/A'}
+Aerobic Effect: ${activity.aerobicTrainingEffect ?? 'N/A'}
+Anaerobic Effect: ${activity.anaerobicTrainingEffect ?? 'N/A'}
+Training Load: ${activity.activityTrainingLoad ?? 'N/A'}
+VO2 Max: ${activity.vO2MaxValue ?? 'N/A'}
+
+=== POWER ===
+Avg Power: ${activity.avgPower ?? 'N/A'} W
+Max Power: ${activity.maxPower ?? 'N/A'} W
+
+=== RUNNING DYNAMICS ===
+Cadence: ${activity.averageRunningCadenceInStepsPerMinute ?? 'N/A'} spm (max: ${activity.maxRunningCadenceInStepsPerMinute ?? 'N/A'})
+Stride Length: ${activity.avgStrideLength ? (activity.avgStrideLength / 100).toFixed(2) : 'N/A'} m
+Vertical Ratio: ${activity.avgVerticalRatio ?? 'N/A'} %
+Vertical Oscillation: ${activity.avgVerticalOscillation ?? 'N/A'} cm
+Ground Contact Time: ${activity.avgGroundContactTime ?? 'N/A'} ms
+
+=== ELEVATION ===
+Total Ascent: ${activity.elevationGain ?? 'N/A'} m
+Total Descent: ${activity.elevationLoss ?? 'N/A'} m
+Min/Max Elevation: ${activity.minElevation ?? 'N/A'} / ${activity.maxElevation ?? 'N/A'} m
+
+=== STAMINA ===
+Beginning: ${activity.beginningStamina ? (activity.beginningStamina * 100).toFixed(0) : 'N/A'}%
+Ending: ${activity.endingStamina ? (activity.endingStamina * 100).toFixed(0) : 'N/A'}%
+Min: ${activity.minStamina ? (activity.minStamina * 100).toFixed(0) : 'N/A'}%
+
+=== INTENSITY MINUTES ===
+Moderate: ${activity.moderateIntensityMinutes ?? 'N/A'} min
+Vigorous: ${activity.vigorousIntensityMinutes ?? 'N/A'} min
+
+=== RECOVERY INDICATORS ===
+Calories: ${activity.calories ?? 'N/A'}
+Est. Sweat Loss: ${activity.estimatedSweatLoss ?? 'N/A'} ml
+Body Battery Impact: ${activity.bodyBatteryChange ?? 'N/A'}
+
+=== ENVIRONMENT ===
+Avg Temp: ${activity.avgTemperature ?? 'N/A'} °C
+Min/Max Temp: ${activity.minTemperature ?? 'N/A'} / ${activity.maxTemperature ?? 'N/A'} °C${workoutContext}${historicalSection}
+
+Focus on: understanding the workout's PURPOSE based on the inferred workout type and metrics, evaluating training intensity, recovery recommendations, and trending performance vs historical data if available. Keep response concise (2-3 sentences).
 
 At the end of your response, add a confidence score from 0.0 to 1.0 indicating how confident you are in your analysis based on the data quality. Format: [CONFIDENCE: X.X]`;
 };
