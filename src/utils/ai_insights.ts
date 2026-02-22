@@ -166,106 +166,62 @@ export const getHistoricalContext = (
 };
 
 /**
- * Calculate trending comparison string
+ * Extract relevant metrics from a Garmin activity to keep the prompt focused
  */
-const formatTrendComparison = (current: number | undefined, previous: number | undefined, metric: string, unit: string, lowerIsBetter = false): string => {
-    if (!current || !previous) return '';
-    const diff = current - previous;
-    const percentChange = ((diff / previous) * 100).toFixed(1);
-    const improved = lowerIsBetter ? diff < 0 : diff > 0;
-    const emoji = improved ? '📈' : '📉';
-    const direction = diff > 0 ? '+' : '';
-    return `${emoji} ${metric}: ${direction}${diff.toFixed(2)} ${unit} (${direction}${percentChange}%)`;
-};
-
-/**
- * Format historical context for the prompt
- */
-const formatHistoricalSection = (context: HistoricalContext, currentActivity: GarminActivity): string => {
-    const sections: string[] = [];
+const extractMetrics = (activity: any) => {
+    if (!activity) return undefined;
     
-    // Calculate current metrics
-    const currentPace = currentActivity.averageSpeed && currentActivity.averageSpeed > 0
-        ? 1000 / currentActivity.averageSpeed / 60
+    // Pre-calculate pace and distance for convenience
+    let paceMinPerKm = activity.averageSpeed && activity.averageSpeed > 0
+        ? (1000 / activity.averageSpeed / 60).toFixed(2)
         : undefined;
-    const currentDistanceKm = currentActivity.distance ? currentActivity.distance / 1000 : undefined;
+        
+    // Use moving pace if total idle time (crosswalks, quick stops) is small (e.g., <= 3 mins)
+    // to reflect actual running pace without penalizing for minor stops.
+    if (activity.distance && activity.distance > 0 && activity.movingDuration && activity.movingDuration > 0) {
+        const totalTime = activity.elapsedDuration || activity.duration || activity.movingDuration;
+        const idleTimeMinutes = (totalTime - activity.movingDuration) / 60;
+        
+        if (idleTimeMinutes > 0 && idleTimeMinutes <= 3) {
+            const movingPace = (activity.movingDuration / 60) / (activity.distance / 1000);
+            paceMinPerKm = movingPace.toFixed(2);
+        }
+    }
+
+    const distanceKm = activity.distance ? (activity.distance / 1000).toFixed(2) : undefined;
+    const durationMin = activity.duration ? (activity.duration / 60).toFixed(1) : undefined;
     
-    // Yesterday comparison
-    if (context.yesterdayActivity) {
-        const yesterdayPace = context.yesterdayActivity.averageSpeed && context.yesterdayActivity.averageSpeed > 0
-            ? 1000 / context.yesterdayActivity.averageSpeed / 60
-            : undefined;
-        const yesterdayDistanceKm = context.yesterdayActivity.distance ? context.yesterdayActivity.distance / 1000 : undefined;
-        
-        const trends: string[] = [];
-        const paceTrend = formatTrendComparison(currentPace, yesterdayPace, 'Pace', 'min/km', true);
-        const distanceTrend = formatTrendComparison(currentDistanceKm, yesterdayDistanceKm, 'Distance', 'km');
-        const hrTrend = formatTrendComparison(currentActivity.averageHR, context.yesterdayActivity.averageHR, 'Avg HR', 'bpm', true);
-        
-        if (paceTrend) trends.push(paceTrend);
-        if (distanceTrend) trends.push(distanceTrend);
-        if (hrTrend) trends.push(hrTrend);
-        
-        if (trends.length > 0) {
-            sections.push(`**Compared to Yesterday (${context.yesterdayActivity.startTimeLocal.split('T')[0]}):**\n${trends.join('\n')}`);
+    // Pick keys from the interface to ensure no bloated nested data gets sent
+    const keys = [
+        'activityId', 'activityName', 'startTimeLocal', 
+        'averageHR', 'maxHR', 'calories', 
+        'elevationGain', 'elevationLoss', 'minElevation', 'maxElevation', 
+        'averageRunningCadenceInStepsPerMinute', 'maxRunningCadenceInStepsPerMinute', 
+        'aerobicTrainingEffect', 'anaerobicTrainingEffect', 'trainingEffectLabel', 
+        'vO2MaxValue', 'avgStrideLength', 'avgGroundContactTime', 'avgVerticalOscillation', 
+        'avgVerticalRatio', 'activityTrainingLoad', 'avgPower', 'maxPower', 'normPower', 
+        'beginningStamina', 'endingStamina', 'minStamina', 'avgTemperature', 'minTemperature', 
+        'maxTemperature', 'moderateIntensityMinutes', 'vigorousIntensityMinutes', 
+        'bodyBatteryChange', 'estimatedSweatLoss', 'bestPace', 'avgGradeAdjustedPace'
+    ];
+    
+    const result: any = {
+        distanceKm,
+        durationMin,
+        paceMinPerKm
+    };
+    
+    for (const key of keys) {
+        if (activity[key] !== undefined && activity[key] !== null) {
+            result[key] = activity[key];
         }
     }
     
-    // Last week comparison
-    if (context.lastWeekActivity) {
-        const lastWeekPace = context.lastWeekActivity.averageSpeed && context.lastWeekActivity.averageSpeed > 0
-            ? 1000 / context.lastWeekActivity.averageSpeed / 60
-            : undefined;
-        const lastWeekDistanceKm = context.lastWeekActivity.distance ? context.lastWeekActivity.distance / 1000 : undefined;
-        
-        const trends: string[] = [];
-        const paceTrend = formatTrendComparison(currentPace, lastWeekPace, 'Pace', 'min/km', true);
-        const distanceTrend = formatTrendComparison(currentDistanceKm, lastWeekDistanceKm, 'Distance', 'km');
-        const hrTrend = formatTrendComparison(currentActivity.averageHR, context.lastWeekActivity.averageHR, 'Avg HR', 'bpm', true);
-        
-        if (paceTrend) trends.push(paceTrend);
-        if (distanceTrend) trends.push(distanceTrend);
-        if (hrTrend) trends.push(hrTrend);
-        
-        if (trends.length > 0) {
-            sections.push(`**Compared to Last Week (${context.lastWeekActivity.startTimeLocal.split('T')[0]}):**\n${trends.join('\n')}`);
-        }
+    if (activity.activityType?.typeKey) {
+        result.activityType = activity.activityType.typeKey;
     }
     
-    // Weekly average comparison
-    if (context.recentActivities.length > 0) {
-        const avgPace = context.recentActivities.reduce((sum, a) => {
-            if (a.averageSpeed && a.averageSpeed > 0) {
-                return sum + (1000 / a.averageSpeed / 60);
-            }
-            return sum;
-        }, 0) / context.recentActivities.filter(a => a.averageSpeed && a.averageSpeed > 0).length;
-        
-        const avgDistance = context.recentActivities.reduce((sum, a) => sum + (a.distance || 0), 0) / context.recentActivities.length / 1000;
-        const avgHR = context.recentActivities.reduce((sum, a) => sum + (a.averageHR || 0), 0) / context.recentActivities.filter(a => a.averageHR).length;
-        
-        const trends: string[] = [];
-        if (avgPace && currentPace) {
-            const paceTrend = formatTrendComparison(currentPace, avgPace, 'Pace vs 7-activity avg', 'min/km', true);
-            if (paceTrend) trends.push(paceTrend);
-        }
-        if (avgDistance && currentDistanceKm) {
-            const distanceTrend = formatTrendComparison(currentDistanceKm, avgDistance, 'Distance vs 7-activity avg', 'km');
-            if (distanceTrend) trends.push(distanceTrend);
-        }
-        if (avgHR && currentActivity.averageHR) {
-            const hrTrend = formatTrendComparison(currentActivity.averageHR, avgHR, 'Avg HR vs 7-activity avg', 'bpm', true);
-            if (hrTrend) trends.push(hrTrend);
-        }
-        
-        if (trends.length > 0) {
-            sections.push(`**Trend vs Recent Activities (${context.recentActivities.length} activities):**\n${trends.join('\n')}`);
-        }
-    }
-    
-    return sections.length > 0 
-        ? `\n\n--- TRENDING DATA ---\n${sections.join('\n\n')}`
-        : '';
+    return result;
 };
 
 /**
@@ -289,15 +245,6 @@ const getTimeOfDay = (timestamp: string): string => {
  */
 const formatActivityPrompt = (activity: GarminActivity, historicalContext?: HistoricalContext): string => {
     const activityType = activity.activityType?.typeKey || 'unknown';
-    const distanceKm = activity.distance ? (activity.distance / 1000).toFixed(2) : 'N/A';
-    const durationMin = activity.duration ? (activity.duration / 60).toFixed(1) : 'N/A';
-    const paceMinPerKm = activity.averageSpeed && activity.averageSpeed > 0
-        ? (1000 / activity.averageSpeed / 60).toFixed(2)
-        : 'N/A';
-
-    const historicalSection = historicalContext ? formatHistoricalSection(historicalContext, activity) : '';
-    
-    // Extract time of day from timestamp
     const timeOfDay = getTimeOfDay(activity.startTimeLocal);
     
     // Activity name typically contains location (e.g., "Shenzhen Running", "Park Run")
@@ -352,14 +299,14 @@ const formatActivityPrompt = (activity: GarminActivity, historicalContext?: Hist
     const workoutContext = workoutHints.length > 0 
         ? `\n\n--- WORKOUT TYPE INFERENCE (from data) ---\n${workoutHints.join('\n')}`
         : '';
-
-    // Format pace metrics
-    const bestPaceFormatted = activity.bestPace && activity.bestPace > 0
-        ? (1000 / activity.bestPace / 60).toFixed(2)
-        : 'N/A';
-    const gradeAdjustedPace = activity.avgGradeAdjustedPace && activity.avgGradeAdjustedPace > 0
-        ? (1000 / activity.avgGradeAdjustedPace / 60).toFixed(2)
-        : 'N/A';
+        
+    const currentActivityMetricsMsg = JSON.stringify(extractMetrics(activity), null, 2);
+    
+    const historicalContextMsg = historicalContext ? JSON.stringify({
+        yesterdayActivity: extractMetrics(historicalContext.yesterdayActivity),
+        lastWeekActivity: extractMetrics(historicalContext.lastWeekActivity),
+        recentActivities: historicalContext.recentActivities.map(a => extractMetrics(a))
+    }, null, 2) : 'No historical data available.';
 
     return `Analyze this ${activityType} workout and provide brief, actionable insights in 2-3 sentences.
 
@@ -371,70 +318,16 @@ IMPORTANT: Analyze the workout HOLISTICALLY. Consider:
 5. Don't judge metrics in isolation - understand the full picture
 6. Time of day affects performance (morning: fresh but stiff, afternoon: peak body temp, evening: accumulated fatigue, night: lower visibility)
 7. The activity name often contains LOCATION info (city, park, trail) - consider terrain and environmental factors
+8. CRITICAL: Evaluate ALL provided metrics comprehensively (e.g., pace, heart rate, average stride length, training effect, cadence, power, and any other performance metric available) alongside the date.
+9. CRITICAL: Analyze the time elapsed since the previous activities of the same type (using startTimeLocal) and correlate it with the performance metrics. Consider its potential impact (e.g., fatigue from insufficient rest, detraining from a long gap, or optimal recovery) and explicitly mention this impact in the insights.
 
-=== CONTEXT ===
-Activity: ${activity.activityName} (Location hint in name)
-Type: ${activityType}
-Time of Day: ${timeOfDay}
-Date/Time: ${activity.startTimeLocal}
+=== CURRENT ACTIVITY METRICS ===
+${currentActivityMetricsMsg}
 
-=== TIMING ===
-Duration: ${durationMin} minutes
-Moving Time: ${activity.movingDuration ? (activity.movingDuration / 60).toFixed(1) : 'N/A'} min
-Elapsed Time: ${activity.elapsedDuration ? (activity.elapsedDuration / 60).toFixed(1) : 'N/A'} min
+=== HISTORICAL CONTEXT ===
+${historicalContextMsg}${workoutContext}
 
-=== DISTANCE & PACE ===
-Distance: ${distanceKm} km
-Average Pace: ${paceMinPerKm} min/km
-Best Pace: ${bestPaceFormatted} min/km
-Grade-Adjusted Pace: ${gradeAdjustedPace} min/km
-
-=== HEART RATE ===
-Average HR: ${activity.averageHR ?? 'N/A'} bpm
-Max HR: ${activity.maxHR ?? 'N/A'} bpm
-
-=== TRAINING EFFECT ===
-Primary Benefit: ${activity.trainingEffectLabel ?? 'N/A'}
-Aerobic Effect: ${activity.aerobicTrainingEffect ?? 'N/A'}
-Anaerobic Effect: ${activity.anaerobicTrainingEffect ?? 'N/A'}
-Training Load: ${activity.activityTrainingLoad ?? 'N/A'}
-VO2 Max: ${activity.vO2MaxValue ?? 'N/A'}
-
-=== POWER ===
-Avg Power: ${activity.avgPower ?? 'N/A'} W
-Max Power: ${activity.maxPower ?? 'N/A'} W
-
-=== RUNNING DYNAMICS ===
-Cadence: ${activity.averageRunningCadenceInStepsPerMinute ?? 'N/A'} spm (max: ${activity.maxRunningCadenceInStepsPerMinute ?? 'N/A'})
-Stride Length: ${activity.avgStrideLength ? (activity.avgStrideLength / 100).toFixed(2) : 'N/A'} m
-Vertical Ratio: ${activity.avgVerticalRatio ?? 'N/A'} %
-Vertical Oscillation: ${activity.avgVerticalOscillation ?? 'N/A'} cm
-Ground Contact Time: ${activity.avgGroundContactTime ?? 'N/A'} ms
-
-=== ELEVATION ===
-Total Ascent: ${activity.elevationGain ?? 'N/A'} m
-Total Descent: ${activity.elevationLoss ?? 'N/A'} m
-Min/Max Elevation: ${activity.minElevation ?? 'N/A'} / ${activity.maxElevation ?? 'N/A'} m
-
-=== STAMINA ===
-Beginning: ${activity.beginningStamina ? (activity.beginningStamina * 100).toFixed(0) : 'N/A'}%
-Ending: ${activity.endingStamina ? (activity.endingStamina * 100).toFixed(0) : 'N/A'}%
-Min: ${activity.minStamina ? (activity.minStamina * 100).toFixed(0) : 'N/A'}%
-
-=== INTENSITY MINUTES ===
-Moderate: ${activity.moderateIntensityMinutes ?? 'N/A'} min
-Vigorous: ${activity.vigorousIntensityMinutes ?? 'N/A'} min
-
-=== RECOVERY INDICATORS ===
-Calories: ${activity.calories ?? 'N/A'}
-Est. Sweat Loss: ${activity.estimatedSweatLoss ?? 'N/A'} ml
-Body Battery Impact: ${activity.bodyBatteryChange ?? 'N/A'}
-
-=== ENVIRONMENT ===
-Avg Temp: ${activity.avgTemperature ?? 'N/A'} °C
-Min/Max Temp: ${activity.minTemperature ?? 'N/A'} / ${activity.maxTemperature ?? 'N/A'} °C${workoutContext}${historicalSection}
-
-Focus on: understanding the workout's PURPOSE based on the inferred workout type and metrics, evaluating training intensity, recovery recommendations, and trending performance vs historical data if available. Keep response concise (2-3 sentences).
+Focus on: understanding the workout's PURPOSE based on the inferred workout type and metrics, evaluating training intensity, recovery recommendations, and trending performance vs historical data (and rest periods) if available. Keep response concise (2-3 sentences).
 
 At the end of your response, add a confidence score from 0.0 to 1.0 indicating how confident you are in your analysis based on the data quality. Format: [CONFIDENCE: X.X]`;
 };
@@ -622,7 +515,8 @@ export const processActivityWithInsights = async (
             // Post as comment to Garmin activity if client is provided
             if (client) {
                 console.log(`AI Insights: Posting as comment to Garmin activity ${activityId}...`);
-                const commentText = `🤖 AI Insights (${result.model}, ${(result.confidence * 100).toFixed(0)}% confidence):\n${result.insight}`;
+                const timestamp = new Date().toLocaleString('zh-CN', { timeZoneName: 'short' });
+                const commentText = `🤖 AI Insights (${result.model}, ${timestamp}):\n${result.insight}\n\nConfidence: ${(result.confidence * 100).toFixed(0)}%`;
                 const commentSuccess = await addActivityComment(activityId, commentText, client, forceUpdate);
                 if (commentSuccess) {
                     console.log(`AI Insights: Comment posted successfully`);
@@ -726,7 +620,10 @@ export const syncMissingInsightsToGarmin = async (
             
             // Format the insight comment
             const confidencePercent = (insight.confidence * 100).toFixed(0);
-            const formattedInsight = `🤖 AI Insights (${insight.model}, ${confidencePercent}% confidence):\n${insight.insight}`;
+            const timestamp = insight.createdAt 
+                ? new Date(insight.createdAt + ' UTC').toLocaleString('zh-CN', { timeZoneName: 'short' }) 
+                : new Date().toLocaleString('zh-CN', { timeZoneName: 'short' });
+            const formattedInsight = `🤖 AI Insights (${insight.model}, ${timestamp}):\n${insight.insight}\n\nConfidence: ${confidencePercent}%`;
             
             console.log(`AI Insights: Posting insight to activity ${insight.activityId} (${insight.activityName})...`);
             
