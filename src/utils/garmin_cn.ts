@@ -120,7 +120,8 @@ export const syncGarminCN2GarminGlobal = async () => {
 
     const latestGlobalActStartTime = globalActs[0]?.startTimeLocal ?? '0';
     const latestCnActStartTime = cnActs[0]?.startTimeLocal ?? '0';
-    if (latestCnActStartTime === latestGlobalActStartTime) {
+    const isForce = process.env.GARMIN_FORCE_SYNC === 'true';
+    if (!isForce && latestCnActStartTime === latestGlobalActStartTime) {
         console.log(timeStamp + ` 没有要同步的活动内容, 最近的活动:  【 ${cnActs[0].activityName} 】, 开始于: 【 ${latestCnActStartTime} 】`);
     } else {
         // fix: #18
@@ -128,16 +129,24 @@ export const syncGarminCN2GarminGlobal = async () => {
         let actualNewActivityCount = 1;
         for (let i = 0; i < cnActs.length; i++) {
             const cnAct = cnActs[i];
-            if (cnAct.startTimeLocal > latestGlobalActStartTime) {
-                // Download original Garmin data
-                const filePath = await downloadGarminActivity(cnAct.activityId, clientCN);
+            const isNew = cnAct.startTimeLocal > latestGlobalActStartTime;
+            
+            if (isForce || isNew) {
                 // Generate AI insights and add to source activity (with trending context)
-                await processActivityWithInsights(cnAct as GarminActivity, clientCN, cnActs as GarminActivity[]);
-                // Upload to Garmin Global
-                console.log(timeStamp + ` 本次开始向国际区上传第 ${number2capital(actualNewActivityCount)} 条数据，【 ${cnAct.activityName} 】，开始于 【 ${cnAct.startTimeLocal} 】，活动ID: 【 ${cnAct.activityId} 】`);
-                await uploadGarminActivity(filePath, clientGlobal);
-                await new Promise(resolve => setTimeout(resolve, 1000));
-                actualNewActivityCount++;
+                // Pass isForce to processActivityWithInsights so it can regenerate if needed
+                await processActivityWithInsights(cnAct as GarminActivity, clientCN, cnActs as GarminActivity[], isForce);
+                
+                if (isNew) {
+                    // Download original Garmin data
+                    const filePath = await downloadGarminActivity(cnAct.activityId, clientCN);
+                    // Upload to Garmin Global
+                    console.log(timeStamp + ` 本次开始向国际区上传第 ${number2capital(actualNewActivityCount)} 条数据，【 ${cnAct.activityName} 】，开始于 【 ${cnAct.startTimeLocal} 】，活动ID: 【 ${cnAct.activityId} 】`);
+                    await uploadGarminActivity(filePath, clientGlobal);
+                    await new Promise(resolve => setTimeout(resolve, 1000));
+                    actualNewActivityCount++;
+                } else {
+                    console.log(timeStamp + ` 活动 【 ${cnAct.activityName} 】 (${cnAct.activityId}) 已存在于国际版，仅强制更新 AI Insights。`);
+                }
             }
         }
     }
