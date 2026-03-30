@@ -3,7 +3,7 @@ export const FILE_SUFFIX = {
     GPX: 'gpx',
     TCX: 'tcx',
 };
-export const DOWNLOAD_DIR = './garmin_fit_files';
+export const DOWNLOAD_DIR = process.env.GARMIN_FIT_DIR || './garmin_fit_files';
 export const DB_FILE_PATH = './db/garmin.db';
 export const AESKEY_DEFAULT = 'LSKDAJALSD';
 /**
@@ -68,5 +68,8 @@ export const STRAVA_REDIRECT_URI_DEFAULT = '';
  * GEMINI AI CONFIGURATION
  */
 export const GEMINI_API_KEY_DEFAULT = '';
+export const VERTEX_API_KEY_DEFAULT = '';
+export const VERTEX_PROJECT_ID_DEFAULT = '';
 export const AI_INSIGHTS_ENABLED_DEFAULT = true;
+export const PRIORITIZE_VERTEX_AI_DEFAULT = false;
 export const AI_INSIGHTS_LEGACY_COUNT_DEFAULT = 10;

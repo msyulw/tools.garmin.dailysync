@@ -72,6 +72,11 @@ export const migrateGarminGlobal2GarminCN = async (count = 200) => {
     const clientGlobal = await getGaminGlobalClient();
     const clientCn = await getGaminCNClient();
 
+    if (!clientGlobal || !clientCn) {
+        console.error('Failed to initialize Garmin clients');
+        return;
+    }
+
     // 从佳明国际区读取活动数据
     const actSlices = await clientGlobal.getActivities(actIndex, totalAct);
     // only running
@@ -94,6 +99,11 @@ export const syncGarminGlobal2GarminCN = async () => {
     const timeStamp = new Date().toLocaleString("zh-cn")
     const clientCN = await getGaminCNClient();
     const clientGlobal = await getGaminGlobalClient();
+
+    if (!clientCN || !clientGlobal) {
+        console.error('Failed to initialize Garmin clients');
+        return;
+    }
 
     const cnActs = await clientCN.getActivities(0, 1);
     let globalActs = await clientGlobal.getActivities(0, Number(GARMIN_SYNC_NUM));

@@ -35,6 +35,12 @@ export const getGaminCNClient = async (): Promise<GarminClientType> => {
 
     const GCClient = new GarminConnect({username: GARMIN_USERNAME, password: GARMIN_PASSWORD}, 'garmin.cn');
 
+    // Debug: Log all outgoing requests to identify plain HTTP to HTTPS port issues
+    GCClient.client.client.interceptors.request.use((config: any) => {
+        console.log(`[DEBUG] Request: ${config.method.toUpperCase()} ${config.url}`);
+        return config;
+    });
+
     try {
         await initDB();
 
@@ -77,6 +83,11 @@ export const migrateGarminCN2GarminGlobal = async (count = 200) => {
     const clientCN = await getGaminCNClient();
     const clientGlobal = await getGaminGlobalClient();
 
+    if (!clientCN || !clientGlobal) {
+        console.error('Failed to initialize Garmin clients');
+        return;
+    }
+
     const actSlices = await clientCN.getActivities(actIndex, totalAct);
     // only running
     // const runningActs = _.filter(actSlices, { activityType: { typeKey: 'running' } });
@@ -98,6 +109,11 @@ export const syncGarminCN2GarminGlobal = async () => {
     const timeStamp = new Date().toLocaleString("zh-cn")
     const clientCN = await getGaminCNClient();
     const clientGlobal = await getGaminGlobalClient();
+
+    if (!clientCN || !clientGlobal) {
+        console.error('Failed to initialize Garmin clients');
+        return;
+    }
 
     let cnActs = await clientCN.getActivities(0, Number(GARMIN_SYNC_NUM));
     const globalActs = await clientGlobal.getActivities(0, 1);
@@ -127,35 +143,66 @@ export const syncGarminCN2GarminGlobal = async () => {
     }
 };
 
-export const downloadAllGarminCN = async (count = 200) => {
-    const actIndex = Number(GARMIN_MIGRATE_START) ?? 0;
-    const totalAct = count;
+export const downloadAllGarminCN = async (batchSize = 100, limit?: number) => {
+    let actIndex = Number(GARMIN_MIGRATE_START) ?? 0;
     const clientCN = await getGaminCNClient();
     
-    console.log(`Fetching up to ${totalAct} activities from CN starting at index ${actIndex}...`);
-    const actSlices = await clientCN.getActivities(actIndex, totalAct);
-    console.log(`Found ${actSlices.length} activities`);
-    
-    const runningActs = actSlices;
+    if (!clientCN) {
+        console.error('Failed to initialize Garmin CN client');
+        return;
+    }
+
     let downloadedCount = 0;
     let insightsCount = 0;
+    let hasMoreActivities = true;
 
-    for (let j = 0; j < runningActs.length; j++) {
-        const act = runningActs[j];
+    console.log(`\n========================================`);
+    console.log(`Starting bulk download/insight process...`);
+    console.log(`Starting index: ${actIndex}, Batch size: ${batchSize}`);
+    console.log(`========================================`);
+
+    while (hasMoreActivities && (limit === undefined || downloadedCount < limit)) {
+        const currentBatchSize = limit !== undefined ? Math.min(batchSize, limit - downloadedCount) : batchSize;
+        console.log(`\nFetching ${currentBatchSize} activities from index ${actIndex}...`);
+        const actSlices = await clientCN.getActivities(actIndex, currentBatchSize);
         
-        // Download activity if not already downloaded
-        if (!isDownloaded(act.activityId)) {
-            const filePath = await downloadGarminActivity(act.activityId, clientCN);
-            console.log(`下载 ${filePath} 完成`);
-            downloadedCount++;
+        if (!actSlices || actSlices.length === 0) {
+            console.log(`Found 0 activities. Reached the end of history.`);
+            hasMoreActivities = false;
+            break;
         }
-        
-        // Process AI insights if enabled
-        if (isAIInsightsEnabled()) {
-            const result = await processActivityWithInsights(act as GarminActivity, clientCN, runningActs as GarminActivity[]);
-            if (result) {
-                insightsCount++;
+
+        console.log(`Found ${actSlices.length} activities in this batch.`);
+        // Start from the newest within the batch as requested
+        const runningActs = actSlices;
+
+        for (let j = 0; j < runningActs.length; j++) {
+            const act = runningActs[j];
+            
+            // Download activity if not already downloaded
+            if (!isDownloaded(act.activityId)) {
+                const filePath = await downloadGarminActivity(act.activityId, clientCN);
+                console.log(`下载 ${filePath} 完成`);
+                downloadedCount++;
+            } else {
+                console.log(`Skipped existing file: ${act.activityId} ${act.activityName}`);
             }
+            
+            // Process AI insights if enabled
+            if (isAIInsightsEnabled()) {
+                const result = await processActivityWithInsights(act as GarminActivity, clientCN, runningActs as GarminActivity[]);
+                if (result) {
+                    insightsCount++;
+                }
+            }
+        }
+
+        // If we got fewer activities than the batch size, we've hit the end
+        if (actSlices.length < batchSize) {
+            console.log(`Reached the end of available activities.`);
+            hasMoreActivities = false;
+        } else {
+            actIndex += batchSize;
         }
     }
     

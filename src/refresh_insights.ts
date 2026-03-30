@@ -139,9 +139,18 @@ const refreshInsights = async () => {
         }
 
         // Fetch activities
+        const startIndex = 0;
         console.log(`📥 Fetching ${count} most recent activities...`);
-        const activities = await client.getActivities(0, count) as GarminActivity[];
-        console.log(`✅ Found ${activities.length} activities`);
+        const fetchedActivities = await client.getActivities(startIndex, count) as GarminActivity[];
+        
+        if (!fetchedActivities || fetchedActivities.length === 0) {
+            console.log(`❌ No activities found in the requested range.`);
+            return;
+        }
+
+        // Reverse to process from oldest to latest within the count
+        const activities = [...fetchedActivities];
+        console.log(`✅ Found ${activities.length} activities (processing from oldest to newest)`);
         console.log('');
 
         // Process each activity

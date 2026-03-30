@@ -61,67 +61,77 @@ export const isDownloaded = (activityId, ) => {
 /**
  * Add AI insights to a Garmin activity description
  * Uses PUT via X-Http-Method-Override to activity-service/activity/{activityId}
- * @param activityId The activity ID to update
- * @param comment The AI insight text to add
- * @param client GarminClientType
- * @param forceCheck If true, re-add insight even if one already exists
- * @returns true if successful, false otherwise
  */
 export const addActivityComment = async (
     activityId: string | number, 
-    comment: string, 
+    insight: string, 
     client: GarminClientType,
-    forceCheck: boolean = false
+    model: string,
+    forceCheck: boolean = false,
+    confidence: number = 1
 ): Promise<boolean> => {
     try {
-        // Get current activity details
         const activity = await client.getActivity({ activityId: activityId });
-        
-        if (!activity) {
-            console.log(`AI Insights: Could not fetch activity ${activityId}`);
-            return false;
-        }
-        
+        if (!activity) return false;
+
         let currentDescription = activity.description || '';
+        const now = new Date();
+        const timestamp = now.getFullYear() + '-' + 
+            String(now.getMonth() + 1).padStart(2, '0') + '-' + 
+            String(now.getDate()).padStart(2, '0') + ' ' + 
+            String(now.getHours()).padStart(2, '0') + ':' + 
+            String(now.getMinutes()).padStart(2, '0');
+
+        // Advanced regexes to find ALL variations of AI insights for deduplication
+        const allInsightsPattern = /(\n\n---\n\n)?🤖 AI Insights[^]*?(?=\n\n---\n\n|$)/g;
         
-        // Check if AI insight is already present
-        const hasExistingInsight = currentDescription.includes('🤖 AI Insights') || currentDescription.includes('AI Insights (');
-        
-        if (hasExistingInsight) {
-            if (!forceCheck) {
-                console.log(`AI Insights: Activity ${activityId} already has AI insight, skipping`);
-                return true;
+        // Find the earliest creation date to preserve it in the 'Updated:' header
+        const allHeadersRegex = /🤖 AI Insights (?:\([^)]+\) |Model: ([^)]+)\) )(\d{4}-\d{2}-\d{2} \d{2}:\d{2}|\d{4}\/\d+\/\d+ [^:]+:\d{2}:\d{2}(?: [^)]+)?)/g;
+        let originalCreatedTime = '';
+        let headerMatch;
+        while ((headerMatch = allHeadersRegex.exec(currentDescription)) !== null) {
+            // Take the very first (earliest) timestamp we find as the original creation time
+            if (!originalCreatedTime) {
+                originalCreatedTime = headerMatch[2];
+                // Simplify format if it's the old GMT string
+                if (originalCreatedTime.includes('/')) {
+                    try {
+                        const d = new Date(originalCreatedTime.replace(' GMT+8', '').replace(/\//g, '-'));
+                        originalCreatedTime = d.getFullYear() + '-' + 
+                            String(d.getMonth() + 1).padStart(2, '0') + '-' + 
+                            String(d.getDate()).padStart(2, '0') + ' ' + 
+                            String(d.getHours()).padStart(2, '0') + ':' + 
+                            String(d.getMinutes()).padStart(2, '0');
+                    } catch (e) {}
+                }
             }
-            // Remove existing AI insight to replace with new one
-            // Pattern matches: optional separator (---) + 🤖 AI Insights... until end or next separator
-            const insightPattern = /(\n\n---\n\n)?🤖 AI Insights[^]*?(?=\n\n---\n\n|$)/g;
-            currentDescription = currentDescription.replace(insightPattern, '').trim();
-            console.log(`AI Insights: Replacing existing insight for activity ${activityId}`);
         }
-        
-        // Prepare the updated description with separator
+
+        // ALWAYS remove all old blocks if any exist
+        currentDescription = currentDescription.replace(allInsightsPattern, '').trim();
+
+        let newHeader = `🤖 AI Insights (Model: ${model}) ${timestamp}`;
+        if (originalCreatedTime) {
+            newHeader = `🤖 AI Insights (Model: ${model}) ${originalCreatedTime}\nUpdated: ${timestamp}`;
+        }
+
         const separator = currentDescription ? '\n\n---\n\n' : '';
-        const newDescription = currentDescription + separator + comment;
-        
-        // Use POST with X-Http-Method-Override: PUT (same pattern the library uses for DELETE)
+        const confidenceText = confidence < 1 ? `\n\nConfidence: ${(confidence * 100).toFixed(0)}%` : '';
+        const finalDescription = (currentDescription + separator + newHeader + '\n' + insight + confidenceText).trim();
+
         const activityUrl = client.url?.ACTIVITY + activityId;
-        
         await client.client.post(activityUrl, {
             activityId: Number(activityId),
             activityName: activity.activityName,
-            description: newDescription,
+            description: finalDescription,
         }, {
-            headers: {
-                'X-Http-Method-Override': 'PUT',
-            }
+            headers: { 'X-Http-Method-Override': 'PUT' }
         });
-        
-        console.log(`AI Insights: Activity ${activityId} description updated successfully`);
+
+        console.log(`AI Insights: Activity ${activityId} header updated: ${newHeader}`);
         return true;
     } catch (error: any) {
-        const errorMessage = error?.message || error?.statusText || 'Unknown error';
-        const statusCode = error?.response?.status || error?.status || 'N/A';
-        console.error(`AI Insights: Failed to update activity ${activityId} (status: ${statusCode}): ${errorMessage}`);
+        console.error(`AI Insights: Failed to update activity ${activityId}: ${error.message}`);
         return false;
     }
 };

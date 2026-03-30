@@ -1,17 +1,27 @@
 import { GoogleGenerativeAI } from '@google/generative-ai';
 import {
     GEMINI_API_KEY_DEFAULT,
+    VERTEX_API_KEY_DEFAULT,
     AI_INSIGHTS_ENABLED_DEFAULT,
+    PRIORITIZE_VERTEX_AI_DEFAULT,
 } from '../constant';
 import { initAIInsightsTable, saveAIInsight, hasAIInsight, AIInsightData, getAllAIInsights } from './sqlite';
 import { addActivityComment, hasActivityInsight } from './garmin_common';
 import { GarminClientType } from './type';
+import { fetchPerformanceContext, formatPerformanceContext, PerformanceContext } from './garmin_performance';
+import { GoogleAuth } from 'google-auth-library';
+import axios from 'axios';
+const fs = require('fs');
 
 const core = require('@actions/core');
 
-const GEMINI_API_KEY = process.env.GEMINI_API_KEY ?? GEMINI_API_KEY_DEFAULT;
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || GEMINI_API_KEY_DEFAULT;
+const VERTEX_API_KEY = process.env.VERTEX_API_KEY || VERTEX_API_KEY_DEFAULT || '';
+const GOOGLE_APPLICATION_CREDENTIALS = process.env.GOOGLE_APPLICATION_CREDENTIALS || '';
 const AI_INSIGHTS_ENABLED = process.env.AI_INSIGHTS_ENABLED !== 'false' && AI_INSIGHTS_ENABLED_DEFAULT;
+const PRIORITIZE_VERTEX_AI = process.env.PRIORITIZE_VERTEX_AI === 'true' || PRIORITIZE_VERTEX_AI_DEFAULT;
 const GEMINI_MODEL = 'gemini-2.5-flash-lite';
+const VERTEX_REGION = 'us-central1';
 
 let genAI: GoogleGenerativeAI | null = null;
 
@@ -22,21 +32,90 @@ export const isAIInsightsEnabled = (): boolean => {
     if (!AI_INSIGHTS_ENABLED) {
         return false;
     }
-    if (!GEMINI_API_KEY) {
-        console.log('AI Insights: GEMINI_API_KEY not set, feature disabled');
+    if (!GEMINI_API_KEY && !VERTEX_API_KEY && !GOOGLE_APPLICATION_CREDENTIALS) {
+        console.log('AI Insights: No AI credentials set (GEMINI_API_KEY, VERTEX_API_KEY, or GOOGLE_APPLICATION_CREDENTIALS), feature disabled');
         return false;
     }
     return true;
 };
 
+const getGeminiClient = (apiKey: string): GoogleGenerativeAI => {
+    return new GoogleGenerativeAI(apiKey);
+};
+
 /**
- * Initialize the Gemini client
+ * Generate activity insights using Vertex AI REST API with Service Account
  */
-const getGeminiClient = (): GoogleGenerativeAI => {
-    if (!genAI) {
-        genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
+const generateWithVertexFallback = async (prompt: string): Promise<string | null> => {
+    if (!GOOGLE_APPLICATION_CREDENTIALS) {
+        return null;
     }
-    return genAI;
+
+    try {
+        console.log('AI Insights: Attempting Vertex AI fallback...');
+        let credentials;
+        
+        // Check if GOOGLE_APPLICATION_CREDENTIALS is a JSON string or a file path
+        if (GOOGLE_APPLICATION_CREDENTIALS.trim().startsWith('{')) {
+            credentials = JSON.parse(GOOGLE_APPLICATION_CREDENTIALS);
+        } else {
+            // Assume it's a file path
+            console.log(`AI Insights: Reading credentials from path: ${GOOGLE_APPLICATION_CREDENTIALS}`);
+            const fileContent = fs.readFileSync(GOOGLE_APPLICATION_CREDENTIALS, 'utf8');
+            credentials = JSON.parse(fileContent);
+        }
+        
+        const projectId = credentials.project_id;
+        
+        if (!projectId) {
+            throw new Error('Vertex AI: MISSING project_id in credentials');
+        }
+
+        const auth = new GoogleAuth({
+            credentials,
+            scopes: 'https://www.googleapis.com/auth/cloud-platform',
+        });
+
+        const authResult: any = await auth.getAccessToken();
+        const authToken = authResult.token || authResult;
+
+        if (!authToken) {
+            throw new Error('Vertex AI: Failed to obtain access token');
+        }
+
+        const url = `https://${VERTEX_REGION}-aiplatform.googleapis.com/v1/projects/${projectId}/locations/${VERTEX_REGION}/publishers/google/models/${GEMINI_MODEL}:generateContent`;
+
+        const response = await axios.post(
+            url,
+            {
+                contents: [{
+                    role: 'user',
+                    parts: [{ text: prompt }]
+                }],
+                generationConfig: {
+                    temperature: 0.2,
+                    topP: 0.8,
+                    maxOutputTokens: 1024
+                }
+            },
+            {
+                headers: {
+                    'Authorization': `Bearer ${authToken}`,
+                    'Content-Type': 'application/json',
+                }
+            }
+        );
+
+        if (response.data && response.data.candidates && response.data.candidates[0].content) {
+            return response.data.candidates[0].content.parts[0].text;
+        }
+        
+        console.error('Vertex AI Response error:', response.data);
+        return null;
+    } catch (error: any) {
+        console.error('AI Insights: Vertex AI fallback failed:', (error.response && error.response.data) || error.message);
+        return null;
+    }
 };
 
 /**
@@ -120,12 +199,12 @@ export const getHistoricalContext = (
     currentActivity: GarminActivity,
     allActivities: GarminActivity[]
 ): HistoricalContext => {
-    const activityType = currentActivity.activityType?.typeKey;
+    const activityType = currentActivity.activityType && currentActivity.activityType.typeKey;
     const currentDate = new Date(currentActivity.startTimeLocal);
     
     // Filter activities of the same type, excluding current activity
     const sameTypeActivities = allActivities.filter(a => 
-        a.activityType?.typeKey === activityType && 
+        (a.activityType && a.activityType.typeKey === activityType) && 
         String(a.activityId) !== String(currentActivity.activityId)
     );
     
@@ -217,7 +296,7 @@ const extractMetrics = (activity: any) => {
         }
     }
     
-    if (activity.activityType?.typeKey) {
+    if (activity.activityType && activity.activityType.typeKey) {
         result.activityType = activity.activityType.typeKey;
     }
     
@@ -243,9 +322,16 @@ const getTimeOfDay = (timestamp: string): string => {
 /**
  * Format activity data into a prompt for Gemini
  */
-const formatActivityPrompt = (activity: GarminActivity, historicalContext?: HistoricalContext): string => {
-    const activityType = activity.activityType?.typeKey || 'unknown';
+const formatActivityPrompt = (
+    activity: GarminActivity, 
+    historicalContext?: HistoricalContext,
+    performanceContext?: PerformanceContext
+): string => {
+    const activityType = (activity.activityType && activity.activityType.typeKey) || 'unknown';
     const timeOfDay = getTimeOfDay(activity.startTimeLocal);
+    
+    // Physiological context from performance indicators
+    const performanceContextMsg = formatPerformanceContext(performanceContext);
     
     // Activity name typically contains location (e.g., "Shenzhen Running", "Park Run")
     // The location context is preserved in the activity name field
@@ -320,6 +406,11 @@ IMPORTANT: Analyze the workout HOLISTICALLY. Consider:
 7. The activity name often contains LOCATION info (city, park, trail) - consider terrain and environmental factors
 8. CRITICAL: Evaluate ALL provided metrics comprehensively (e.g., pace, heart rate, average stride length, training effect, cadence, power, and any other performance metric available) alongside the date.
 9. CRITICAL: Analyze the time elapsed since the previous activities of the same type (using startTimeLocal) and correlate it with the performance metrics. Consider its potential impact (e.g., fatigue from insufficient rest, detraining from a long gap, or optimal recovery) and explicitly mention this impact in the insights.
+10. CRITICAL: Consider the PERFORMANCE CONTEXT which shows the body's readiness state on the day of the activity. A low Training Readiness or depleted Body Battery should adjust your expectations for pace/HR. A high HRV indicates good recovery.
+11. CRITICAL: Prioritize SLEEP DATA as a foundational metric. Poor sleep quality or insufficient duration (below 7 hours) is a primary driver of reduced performance and increased strain. Correlate sleep scores and quality with the workout intensity and recovery advice.
+
+=== PHYSIOLOGICAL PERFORMANCE CONTEXT (Readiness, Sleep, HRV, Body Battery) ===
+${performanceContextMsg}
 
 === CURRENT ACTIVITY METRICS ===
 ${currentActivityMetricsMsg}
@@ -382,41 +473,73 @@ const sleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(r
  * Generate AI insights for an activity using Gemini with retry logic
  * @param activity The current activity to analyze
  * @param allActivities Optional array of all recent activities for trend comparison
+ * @param client Optional Garmin client to fetch physiological performance context
  */
 export const generateActivityInsights = async (
     activity: GarminActivity,
-    allActivities?: GarminActivity[]
+    allActivities?: GarminActivity[],
+    client?: GarminClientType
 ): Promise<AIInsightResult | null> => {
     if (!isAIInsightsEnabled()) {
         return null;
     }
 
     const activityId = String(activity.activityId);
-    const activityType = activity.activityType?.typeKey || 'unknown';
+    const activityType = (activity.activityType && activity.activityType.typeKey) || 'unknown';
+    const activityDate = activity.startTimeLocal.split(' ')[0]; // Extract YYYY-MM-DD
     
-    // Calculate historical context if we have additional activities
+    // Performance Context fetching logic...
+    let performanceContext: PerformanceContext | undefined = undefined;
+    if (client) {
+        try {
+            performanceContext = await fetchPerformanceContext(client, activityDate);
+        } catch (error) {
+            console.error(`AI Insights: Failed to fetch performance context for ${activityId}:`, error);
+        }
+    }
+    
+    // Calculate historical context...
     const historicalContext = allActivities && allActivities.length > 1
         ? getHistoricalContext(activity, allActivities)
         : undefined;
-    
-    if (historicalContext) {
-        const hasYesterday = historicalContext.yesterdayActivity ? 'yes' : 'no';
-        const hasLastWeek = historicalContext.lastWeekActivity ? 'yes' : 'no';
-        console.log(`AI Insights: Historical context - Yesterday: ${hasYesterday}, Last week: ${hasLastWeek}, Recent activities: ${historicalContext.recentActivities.length}`);
+
+    const prompt = formatActivityPrompt(activity, historicalContext, performanceContext);
+
+    // PRIORITY 0: Try Vertex AI Service Account Fallback FIRST if prioritized
+    if (PRIORITIZE_VERTEX_AI && GOOGLE_APPLICATION_CREDENTIALS) {
+        console.log('AI Insights: Vertex AI is prioritized. Attempting Service Account first...');
+        const vertexText = await generateWithVertexFallback(prompt);
+        if (vertexText) {
+            const { insight, confidence } = parseConfidence(vertexText.trim());
+            console.log(`AI Insights: Generated successfully via prioritized Vertex AI (confidence: ${(confidence * 100).toFixed(0)}%)`);
+            return {
+                insight,
+                model: `${GEMINI_MODEL}-vertex`,
+                confidence,
+            };
+        }
+        console.log('AI Insights: Prioritized Vertex AI failed. Falling back to Gemini Tiered Keys...');
     }
-    
-    console.log(`AI Insights: Generating insights for activity ${activityId} (${activityType}: "${activity.activityName}")...`);
 
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
         try {
             // Apply rate limiting
             await waitForRateLimit();
             
-            const client = getGeminiClient();
+            // Determine which API key to use for this attempt
+            // If primary key fails after first attempt, try fallback key if available
+            const currentApiKey = (attempt > 1 && VERTEX_API_KEY) ? VERTEX_API_KEY : GEMINI_API_KEY;
+            
+            if (!currentApiKey) {
+                // If no API key available, skip to Vertex Fallback (Service Account) handled in catch
+                throw new Error('NO_API_KEY');
+            }
+
+            const client = getGeminiClient(currentApiKey);
             const model = client.getGenerativeModel({ model: GEMINI_MODEL });
             
-            console.log(`AI Insights: Calling ${GEMINI_MODEL} API (attempt ${attempt}/${MAX_RETRIES})...`);
-            const prompt = formatActivityPrompt(activity, historicalContext);
+            console.log(`AI Insights: Calling Gemini API (${currentApiKey === VERTEX_API_KEY ? 'Fallback Key' : 'Primary Key'}, attempt ${attempt}/${MAX_RETRIES})...`);
+            const prompt = formatActivityPrompt(activity, historicalContext, performanceContext);
             const result = await model.generateContent(prompt);
             const response = await result.response;
             const text = response.text();
@@ -431,16 +554,34 @@ export const generateActivityInsights = async (
                 confidence,
             };
         } catch (error: any) {
-            const isRateLimited = error?.status === 429 || error?.statusText === 'Too Many Requests';
+            const isRateLimited = (error && error.status === 429) || (error && error.statusText === 'Too Many Requests') || (error.message && error.message.includes('429'));
+            const isNoKey = error.message === 'NO_API_KEY';
             
-            if (isRateLimited && attempt < MAX_RETRIES) {
+            // On last attempt or non-rate-limit critical error, try Vertex AI Service Account fallback if available
+            if ((attempt === MAX_RETRIES || (!isRateLimited && !isNoKey)) && GOOGLE_APPLICATION_CREDENTIALS) {
+                const prompt = formatActivityPrompt(activity, historicalContext, performanceContext);
+                const vertexText = await generateWithVertexFallback(prompt);
+                
+                if (vertexText) {
+                    const { insight, confidence } = parseConfidence(vertexText.trim());
+                    console.log(`AI Insights: Generated successfully via Vertex AI Fallback (confidence: ${(confidence * 100).toFixed(0)}%)`);
+                    
+                    return {
+                        insight,
+                        model: `${GEMINI_MODEL}-vertex`,
+                        confidence,
+                    };
+                }
+            }
+
+            if ((isRateLimited || isNoKey) && attempt < MAX_RETRIES) {
                 // Extract retry delay from error if available, otherwise use exponential backoff
                 let retryDelay = BASE_DELAY_MS * Math.pow(2, attempt - 1);
                 
                 // Try to parse retryDelay from error details
-                if (error?.errorDetails) {
-                    const retryInfo = error.errorDetails.find((d: any) => d['@type']?.includes('RetryInfo'));
-                    if (retryInfo?.retryDelay) {
+                if (error && error.errorDetails) {
+                    const retryInfo = error.errorDetails.find((d: any) => d['@type'] && d['@type'].includes('RetryInfo'));
+                    if (retryInfo && retryInfo.retryDelay) {
                         const match = retryInfo.retryDelay.match(/(\d+)/);
                         if (match) {
                             retryDelay = parseInt(match[1]) * 1000; // Convert seconds to ms
@@ -496,8 +637,8 @@ export const processActivityWithInsights = async (
 
         console.log(`AI Insights: No existing insights found, generating new insights...`);
         
-        // Generate insights with historical context
-        const result = await generateActivityInsights(activity, allActivities);
+        // Generate insights with historical context and performance details
+        const result = await generateActivityInsights(activity, allActivities, client);
         
         if (result) {
             // Save to database with model and confidence
@@ -515,9 +656,7 @@ export const processActivityWithInsights = async (
             // Post as comment to Garmin activity if client is provided
             if (client) {
                 console.log(`AI Insights: Posting as comment to Garmin activity ${activityId}...`);
-                const timestamp = new Date().toLocaleString('zh-CN', { timeZoneName: 'short' });
-                const commentText = `🤖 AI Insights (${result.model}, ${timestamp}):\n${result.insight}\n\nConfidence: ${(result.confidence * 100).toFixed(0)}%`;
-                const commentSuccess = await addActivityComment(activityId, commentText, client, forceUpdate);
+                const commentSuccess = await addActivityComment(activityId, result.insight, client, result.model, !!forceUpdate, result.confidence);
                 if (commentSuccess) {
                     console.log(`AI Insights: Comment posted successfully`);
                 } else {
@@ -631,7 +770,9 @@ export const syncMissingInsightsToGarmin = async (
                 insight.activityId, 
                 formattedInsight, 
                 client,
-                false
+                insight.model || 'unknown',
+                false,
+                insight.confidence || 1
             );
             
             if (success) {
