@@ -182,7 +182,8 @@ export interface GarminActivity {
 export interface HistoricalContext {
     yesterdayActivity?: GarminActivity;
     lastWeekActivity?: GarminActivity;
-    recentActivities: GarminActivity[];
+    recentActivitiesOfSameType: GarminActivity[];
+    recentActivitiesOfAllTypes: GarminActivity[];
 }
 
 /**
@@ -202,10 +203,14 @@ export const getHistoricalContext = (
     const activityType = currentActivity.activityType && currentActivity.activityType.typeKey;
     const currentDate = new Date(currentActivity.startTimeLocal);
     
-    // Filter activities of the same type, excluding current activity
-    const sameTypeActivities = allActivities.filter(a => 
-        (a.activityType && a.activityType.typeKey === activityType) && 
+    // Filter out current activity
+    const otherActivities = allActivities.filter(a => 
         String(a.activityId) !== String(currentActivity.activityId)
+    );
+    
+    // Filter activities of the same type
+    const sameTypeActivities = otherActivities.filter(a => 
+        (a.activityType && a.activityType.typeKey === activityType)
     );
     
     // Calculate yesterday's date range
@@ -219,20 +224,26 @@ export const getHistoricalContext = (
     const lastWeekEnd = new Date(currentDate);
     lastWeekEnd.setDate(lastWeekEnd.getDate() - 6);
     
-    // Find yesterday's activity
+    // Find yesterday's activity (of same type for benchmarking)
     const yesterdayActivity = sameTypeActivities.find(a => {
         const actDate = getDateString(new Date(a.startTimeLocal));
         return actDate === yesterdayStr;
     });
     
-    // Find last week's activity
+    // Find last week's activity (of same type for benchmarking)
     const lastWeekActivity = sameTypeActivities.find(a => {
         const actDate = new Date(a.startTimeLocal);
         return actDate >= lastWeekStart && actDate <= lastWeekEnd;
     });
     
-    // Get recent activities (last 7 activities of same type)
-    const recentActivities = sameTypeActivities
+    // Get recent activities of same type (last 5)
+    const recentActivitiesOfSameType = sameTypeActivities
+        .filter(a => new Date(a.startTimeLocal) < currentDate)
+        .sort((a, b) => new Date(b.startTimeLocal).getTime() - new Date(a.startTimeLocal).getTime())
+        .slice(0, 5);
+
+    // Get recent activities of ALL types (last 7) to show overall training load
+    const recentActivitiesOfAllTypes = otherActivities
         .filter(a => new Date(a.startTimeLocal) < currentDate)
         .sort((a, b) => new Date(b.startTimeLocal).getTime() - new Date(a.startTimeLocal).getTime())
         .slice(0, 7);
@@ -240,7 +251,8 @@ export const getHistoricalContext = (
     return {
         yesterdayActivity,
         lastWeekActivity,
-        recentActivities,
+        recentActivitiesOfSameType,
+        recentActivitiesOfAllTypes,
     };
 };
 
@@ -391,7 +403,8 @@ const formatActivityPrompt = (
     const historicalContextMsg = historicalContext ? JSON.stringify({
         yesterdayActivity: extractMetrics(historicalContext.yesterdayActivity),
         lastWeekActivity: extractMetrics(historicalContext.lastWeekActivity),
-        recentActivities: historicalContext.recentActivities.map(a => extractMetrics(a))
+        recentActivitiesOfSameType: historicalContext.recentActivitiesOfSameType.map(a => extractMetrics(a)),
+        recentActivitiesOfAllTypes: historicalContext.recentActivitiesOfAllTypes.map(a => extractMetrics(a))
     }, null, 2) : 'No historical data available.';
 
     return `Analyze this ${activityType} workout and provide brief, actionable insights in 2-3 sentences.
@@ -405,7 +418,7 @@ IMPORTANT: Analyze the workout HOLISTICALLY. Consider:
 6. Time of day affects performance (morning: fresh but stiff, afternoon: peak body temp, evening: accumulated fatigue, night: lower visibility)
 7. The activity name often contains LOCATION info (city, park, trail) - consider terrain and environmental factors
 8. CRITICAL: Evaluate ALL provided metrics comprehensively (e.g., pace, heart rate, average stride length, training effect, cadence, power, and any other performance metric available) alongside the date.
-9. CRITICAL: Analyze the time elapsed since the previous activities of the same type (using startTimeLocal) and correlate it with the performance metrics. Consider its potential impact (e.g., fatigue from insufficient rest, detraining from a long gap, or optimal recovery) and explicitly mention this impact in the insights.
+9. CRITICAL: Analyze the time elapsed since the previous activities of ANY type (using startTimeLocal), while paying special attention to those of the same type for performance trending. Correlate this with current performance metrics. Consider its potential impact (e.g., fatigue from insufficient rest across different sports, detraining from a long gap, or optimal recovery) and explicitly mention this impact in the insights.
 10. CRITICAL: Consider the PERFORMANCE CONTEXT which shows the body's readiness state on the day of the activity. A low Training Readiness or depleted Body Battery should adjust your expectations for pace/HR. A high HRV indicates good recovery.
 11. CRITICAL: Prioritize SLEEP DATA as a foundational metric. Poor sleep quality or insufficient duration (below 7 hours) is a primary driver of reduced performance and increased strain. Correlate sleep scores and quality with the workout intensity and recovery advice.
 
