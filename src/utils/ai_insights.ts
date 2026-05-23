@@ -9,6 +9,7 @@ import { initAIInsightsTable, saveAIInsight, hasAIInsight, AIInsightData, getAll
 import { addActivityComment, hasActivityInsight } from './garmin_common';
 import { GarminClientType } from './type';
 import { fetchPerformanceContext, formatPerformanceContext, PerformanceContext } from './garmin_performance';
+import { fetchWeatherContext, formatWeatherContext, WeatherContext } from './weather_context';
 import { GoogleAuth } from 'google-auth-library';
 import axios from 'axios';
 const fs = require('fs');
@@ -128,6 +129,8 @@ export interface GarminActivity {
         typeKey?: string;
     };
     startTimeLocal: string;
+    startLatitude?: number;
+    startLongitude?: number;
     distance?: number;
     duration?: number;
     movingDuration?: number;
@@ -337,7 +340,8 @@ const getTimeOfDay = (timestamp: string): string => {
 const formatActivityPrompt = (
     activity: GarminActivity, 
     historicalContext?: HistoricalContext,
-    performanceContext?: PerformanceContext
+    performanceContext?: PerformanceContext,
+    weatherContextObj?: WeatherContext
 ): string => {
     const activityType = (activity.activityType && activity.activityType.typeKey) || 'unknown';
     const timeOfDay = getTimeOfDay(activity.startTimeLocal);
@@ -397,6 +401,48 @@ const formatActivityPrompt = (
     const workoutContext = workoutHints.length > 0 
         ? `\n\n--- WORKOUT TYPE INFERENCE (from data) ---\n${workoutHints.join('\n')}`
         : '';
+
+    // Weather/temperature inference from device sensor data and external API
+    const weatherHints: string[] = [];
+    
+    // Add external API weather data if available
+    const externalWeather = formatWeatherContext(weatherContextObj);
+    if (externalWeather) {
+        weatherHints.push(externalWeather);
+    }
+    
+    // Supplement with device sensor temperature which reflects local microclimate
+    if (activity.avgTemperature !== undefined && activity.avgTemperature !== null) {
+        weatherHints.push(`Device Sensor Average Temp: ${activity.avgTemperature}°C`);
+        
+        if (activity.minTemperature !== undefined && activity.maxTemperature !== undefined) {
+            weatherHints.push(`Device Sensor Range: ${activity.minTemperature}°C – ${activity.maxTemperature}°C`);
+        }
+        
+        // Heat stress indicators based on device temp
+        if (activity.avgTemperature >= 32) {
+            weatherHints.push(`⚠️ EXTREME HEAT: ${activity.avgTemperature}°C – significant cardiovascular strain expected. HR likely elevated 10-20 bpm above normal. Pace will naturally slow. High dehydration and heat illness risk.`);
+        } else if (activity.avgTemperature >= 28) {
+            weatherHints.push(`⚠️ HOT CONDITIONS: ${activity.avgTemperature}°C – expect elevated HR (5-15 bpm above normal), increased sweat rate, and pace degradation of 2-5%. Hydration is critical.`);
+        } else if (activity.avgTemperature >= 24) {
+            weatherHints.push(`WARM CONDITIONS: ${activity.avgTemperature}°C – mild heat impact on performance. HR may be slightly elevated. Adequate hydration needed.`);
+        } else if (activity.avgTemperature >= 10 && activity.avgTemperature < 24) {
+            weatherHints.push(`FAVORABLE CONDITIONS: ${activity.avgTemperature}°C – near-optimal temperature range for endurance performance.`);
+        } else if (activity.avgTemperature >= 0 && activity.avgTemperature < 10) {
+            weatherHints.push(`COLD CONDITIONS: ${activity.avgTemperature}°C – muscles may take longer to warm up. Risk of reduced flexibility and slower early pace. Extended warm-up beneficial.`);
+        } else if (activity.avgTemperature < 0) {
+            weatherHints.push(`⚠️ FREEZING CONDITIONS: ${activity.avgTemperature}°C – significant cold stress. Breathing cold air strains airways. Risk of hypothermia on longer efforts. Layering essential.`);
+        }
+        
+        // Sweat loss correlation with temperature
+        if (activity.estimatedSweatLoss && activity.avgTemperature >= 25) {
+            weatherHints.push(`Estimated Sweat Loss: ${activity.estimatedSweatLoss}ml – correlate with temperature for hydration assessment.`);
+        }
+    }
+
+    const weatherContext = weatherHints.length > 0
+        ? `\n\n--- WEATHER / TEMPERATURE CONTEXT ---\n${weatherHints.join('\n')}`
+        : '';
         
     const currentActivityMetricsMsg = JSON.stringify(extractMetrics(activity), null, 2);
     
@@ -421,6 +467,7 @@ IMPORTANT: Analyze the workout HOLISTICALLY. Consider:
 9. CRITICAL: Analyze the time elapsed since the previous activities of ANY type (using startTimeLocal), while paying special attention to those of the same type for performance trending. Correlate this with current performance metrics. Consider its potential impact (e.g., fatigue from insufficient rest across different sports, detraining from a long gap, or optimal recovery) and explicitly mention this impact in the insights.
 10. CRITICAL: Consider the PERFORMANCE CONTEXT which shows the body's readiness state on the day of the activity. A low Training Readiness or depleted Body Battery should adjust your expectations for pace/HR. A high HRV indicates good recovery.
 11. CRITICAL: Prioritize SLEEP DATA as a foundational metric. Poor sleep quality or insufficient duration (below 7 hours) is a primary driver of reduced performance and increased strain. Correlate sleep scores and quality with the workout intensity and recovery advice.
+12. CRITICAL: Factor in WEATHER AND TEMPERATURE conditions during the workout. The device sensor captures ambient temperature. Heat (≥28°C) elevates HR by 5-20 bpm, degrades pace, and increases dehydration risk – adjust pace/HR expectations accordingly and don't penalize performance for heat-related slowdowns. Cold (<10°C) can slow warm-up, reduce flexibility, and strain airways. Optimal performance range is roughly 10-22°C. Always correlate temperature with sweat loss, HR drift, and pacing when evaluating the workout.
 
 === PHYSIOLOGICAL PERFORMANCE CONTEXT (Readiness, Sleep, HRV, Body Battery) ===
 ${performanceContextMsg}
@@ -429,9 +476,9 @@ ${performanceContextMsg}
 ${currentActivityMetricsMsg}
 
 === HISTORICAL CONTEXT ===
-${historicalContextMsg}${workoutContext}
+${historicalContextMsg}${workoutContext}${weatherContext}
 
-Focus on: understanding the workout's PURPOSE based on the inferred workout type and metrics, evaluating training intensity, recovery recommendations, and trending performance vs historical data (and rest periods) if available. Keep response concise (2-3 sentences).
+Focus on: understanding the workout's PURPOSE based on the inferred workout type and metrics, evaluating training intensity, weather impact on performance, recovery recommendations, and trending performance vs historical data (and rest periods) if available. Keep response concise (2-3 sentences).
 
 At the end of your response, add a confidence score from 0.0 to 1.0 indicating how confident you are in your analysis based on the data quality. Format: [CONFIDENCE: X.X]`;
 };
@@ -443,6 +490,7 @@ export interface AIInsightResult {
     insight: string;
     model: string;
     confidence: number;
+    weatherCondition?: string;
 }
 
 /**
@@ -516,7 +564,17 @@ export const generateActivityInsights = async (
         ? getHistoricalContext(activity, allActivities)
         : undefined;
 
-    const prompt = formatActivityPrompt(activity, historicalContext, performanceContext);
+    // Fetch Weather context...
+    let weatherContextObj: WeatherContext | undefined = undefined;
+    if (activity.startLatitude && activity.startLongitude) {
+        weatherContextObj = await fetchWeatherContext(
+            activity.startLatitude,
+            activity.startLongitude,
+            activity.startTimeLocal
+        );
+    }
+
+    const prompt = formatActivityPrompt(activity, historicalContext, performanceContext, weatherContextObj);
 
     // PRIORITY 0: Try Vertex AI Service Account Fallback FIRST if prioritized
     if (PRIORITIZE_VERTEX_AI && GOOGLE_APPLICATION_CREDENTIALS) {
@@ -529,6 +587,7 @@ export const generateActivityInsights = async (
                 insight,
                 model: `${GEMINI_MODEL}-vertex`,
                 confidence,
+                weatherCondition: weatherContextObj?.weatherCondition,
             };
         }
         console.log('AI Insights: Prioritized Vertex AI failed. Falling back to Gemini Tiered Keys...');
@@ -552,7 +611,7 @@ export const generateActivityInsights = async (
             const model = client.getGenerativeModel({ model: GEMINI_MODEL });
             
             console.log(`AI Insights: Calling Gemini API (${currentApiKey === VERTEX_API_KEY ? 'Fallback Key' : 'Primary Key'}, attempt ${attempt}/${MAX_RETRIES})...`);
-            const prompt = formatActivityPrompt(activity, historicalContext, performanceContext);
+            const prompt = formatActivityPrompt(activity, historicalContext, performanceContext, weatherContextObj);
             const result = await model.generateContent(prompt);
             const response = await result.response;
             const text = response.text();
@@ -565,6 +624,7 @@ export const generateActivityInsights = async (
                 insight,
                 model: GEMINI_MODEL,
                 confidence,
+                weatherCondition: weatherContextObj?.weatherCondition,
             };
         } catch (error: any) {
             const isRateLimited = (error && error.status === 429) || (error && error.statusText === 'Too Many Requests') || (error.message && error.message.includes('429'));
@@ -583,6 +643,7 @@ export const generateActivityInsights = async (
                         insight,
                         model: `${GEMINI_MODEL}-vertex`,
                         confidence,
+                        weatherCondition: weatherContextObj?.weatherCondition,
                     };
                 }
             }
@@ -662,6 +723,7 @@ export const processActivityWithInsights = async (
                 insight: result.insight,
                 model: result.model,
                 confidence: result.confidence,
+                weatherCondition: result.weatherCondition,
             };
             await saveAIInsight(insightData);
             console.log(`AI Insights: Saved to database successfully`);
@@ -669,7 +731,15 @@ export const processActivityWithInsights = async (
             // Post as comment to Garmin activity if client is provided
             if (client) {
                 console.log(`AI Insights: Posting as comment to Garmin activity ${activityId}...`);
-                const commentSuccess = await addActivityComment(activityId, result.insight, client, result.model, !!forceUpdate, result.confidence);
+                const commentSuccess = await addActivityComment(
+                    activityId, 
+                    result.insight, 
+                    client, 
+                    result.model, 
+                    !!forceUpdate, 
+                    result.confidence,
+                    result.weatherCondition
+                );
                 if (commentSuccess) {
                     console.log(`AI Insights: Comment posted successfully`);
                 } else {
@@ -770,22 +840,16 @@ export const syncMissingInsightsToGarmin = async (
                 continue;
             }
             
-            // Format the insight comment
-            const confidencePercent = (insight.confidence * 100).toFixed(0);
-            const timestamp = insight.createdAt 
-                ? new Date(insight.createdAt + ' UTC').toLocaleString('zh-CN', { timeZoneName: 'short' }) 
-                : new Date().toLocaleString('zh-CN', { timeZoneName: 'short' });
-            const formattedInsight = `🤖 AI Insights (${insight.model}, ${timestamp}):\n${insight.insight}\n\nConfidence: ${confidencePercent}%`;
-            
             console.log(`AI Insights: Posting insight to activity ${insight.activityId} (${insight.activityName})...`);
             
             const success = await addActivityComment(
                 insight.activityId, 
-                formattedInsight, 
+                insight.insight, 
                 client,
                 insight.model || 'unknown',
                 false,
-                insight.confidence || 1
+                insight.confidence || 1,
+                insight.weatherCondition
             );
             
             if (success) {

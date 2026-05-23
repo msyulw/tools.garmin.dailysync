@@ -101,7 +101,8 @@ export const initAIInsightsTable = async () => {
             insight TEXT,
             model VARCHAR(50),
             confidence REAL,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            weather_condition TEXT
         )`);
         console.log('AI Insights: Created new ai_insights table');
     } else {
@@ -110,6 +111,7 @@ export const initAIInsightsTable = async () => {
             { column: 'model', type: 'VARCHAR(50)', defaultValue: "'unknown'" },
             { column: 'confidence', type: 'REAL', defaultValue: '0.7' },
             { column: 'created_at', type: 'DATETIME', defaultValue: "datetime('now')" },
+            { column: 'weather_condition', type: 'TEXT' },
         ];
         
         for (const migration of migrations) {
@@ -128,13 +130,14 @@ export interface AIInsightData {
     insight: string;
     model: string;
     confidence: number;
+    weatherCondition?: string;
 }
 
 export const saveAIInsight = async (data: AIInsightData): Promise<void> => {
     const db = await getDB();
     await db.run(
-        `INSERT OR REPLACE INTO ai_insights (activity_id, activity_name, insight, model, confidence, created_at) VALUES (?, ?, ?, ?, ?, datetime('now'))`,
-        data.activityId, data.activityName, data.insight, data.model, data.confidence,
+        `INSERT OR REPLACE INTO ai_insights (activity_id, activity_name, insight, model, confidence, weather_condition, created_at) VALUES (?, ?, ?, ?, ?, ?, datetime('now'))`,
+        data.activityId, data.activityName, data.insight, data.model, data.confidence, data.weatherCondition,
     );
 };
 
@@ -175,7 +178,7 @@ export interface AIInsightRecord extends AIInsightData {
 export const getAllAIInsights = async (): Promise<AIInsightRecord[]> => {
     const db = await getDB();
     const results = await db.all(
-        'SELECT id, activity_id, activity_name, insight, model, confidence, created_at FROM ai_insights ORDER BY id DESC'
+        'SELECT id, activity_id, activity_name, insight, model, confidence, weather_condition, created_at FROM ai_insights ORDER BY id DESC'
     );
     return results.map((r: any) => ({
         id: r.id,
@@ -184,6 +187,7 @@ export const getAllAIInsights = async (): Promise<AIInsightRecord[]> => {
         insight: r.insight,
         model: r.model,
         confidence: r.confidence,
+        weatherCondition: r.weather_condition,
         createdAt: r.created_at,
     }));
 };

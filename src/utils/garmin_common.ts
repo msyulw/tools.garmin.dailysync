@@ -68,7 +68,8 @@ export const addActivityComment = async (
     client: GarminClientType,
     model: string,
     forceCheck: boolean = false,
-    confidence: number = 1
+    confidence: number = 1,
+    weatherCondition?: string
 ): Promise<boolean> => {
     try {
         const activity = await client.getActivity({ activityId: activityId });
@@ -110,9 +111,10 @@ export const addActivityComment = async (
         // ALWAYS remove all old blocks if any exist
         currentDescription = currentDescription.replace(allInsightsPattern, '').trim();
 
-        let newHeader = `🤖 AI Insights (Model: ${model}) ${timestamp}`;
+        const weatherText = weatherCondition ? ` | Weather: ${weatherCondition}` : '';
+        let newHeader = `🤖 AI Insights (Model: ${model}) ${timestamp}${weatherText}`;
         if (originalCreatedTime) {
-            newHeader = `🤖 AI Insights (Model: ${model}) ${originalCreatedTime}\nUpdated: ${timestamp}`;
+            newHeader = `🤖 AI Insights (Model: ${model}) ${originalCreatedTime}\nUpdated: ${timestamp}${weatherText}`;
         }
 
         const separator = currentDescription ? '\n\n---\n\n' : '';
